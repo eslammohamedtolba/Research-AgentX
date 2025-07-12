@@ -1,7 +1,5 @@
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-# from langgraph.checkpoint.sqlite import SqliteSaver
-# import sqlite3 
 
 
 # Import from our local project files
@@ -68,11 +66,5 @@ def create_graph():
     
     # Create memory and compile the graph
     memory = MemorySaver()
-    
-    # # Create connection
-    # sqlite_conn = sqlite3.connect("db.sqlite", check_same_thread = False)
-
-    # # Create memory
-    # memory = SqliteSaver(conn = sqlite_conn)
     
     return graph.compile(checkpointer=memory)
