@@ -1,14 +1,21 @@
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+# from langgraph.checkpoint.sqlite import SqliteSaver
+# import sqlite3 
+
 
 # Import from our local project files
 from state import ResearchState
 from nodes import (
     research_strategist,
     web_search_node,
-    fetch_arxiv_node,
+    arxiv_search_node,
     rag_search_node,
-    synthesizer_node
+    grade_and_filter_node,
+    refine_query_node,
+    synthesizer_node,
+    route_after_strategist,
+    route_to_next_tool
 )
 
 def create_graph():
@@ -16,19 +23,56 @@ def create_graph():
     graph = StateGraph(ResearchState)
     
     # Add all the nodes
-    graph.add_node("Research_Strategist_node", research_strategist)
-    graph.add_node("web_search_node", web_search_node)
-    graph.add_node("fetch_arxiv_node", fetch_arxiv_node)
-    graph.add_node("rag_search_node", rag_search_node)
-    graph.add_node("Synthesizer_node", synthesizer_node)
+    graph.add_node("Research_Strategist", research_strategist)
+    graph.add_node("refine_query", refine_query_node)
+    graph.add_node("web_search", web_search_node)
+    graph.add_node("arxiv_search", arxiv_search_node)
+    graph.add_node("rag_search", rag_search_node)
+    graph.add_node("grade_and_filter", grade_and_filter_node)
+    graph.add_node("synthesize", synthesizer_node)
     
-    # Set the entry point and define edges
-    graph.set_entry_point("Research_Strategist_node")
-    graph.add_edge("web_search_node", "Research_Strategist_node")
-    graph.add_edge("fetch_arxiv_node", "Research_Strategist_node")
-    graph.add_edge("rag_search_node", "Research_Strategist_node")
-    graph.add_edge("Synthesizer_node", END)
+    # Set the entry point
+    graph.set_entry_point("Research_Strategist")
+    
+    # Add the first conditional edge from the strategist
+    graph.add_conditional_edges(
+        "Research_Strategist",
+        route_after_strategist,
+        {
+            "refine_query": "refine_query",
+            "web_search": "web_search",
+            "arxiv_search": "arxiv_search",
+            "rag_search": "rag_search",
+            "synthesize": "synthesize"
+        }
+    )
+    
+    # Add the second conditional edge from the refinement node
+    graph.add_conditional_edges(
+        "refine_query", 
+        route_to_next_tool,
+        {
+            "web_search": "web_search",
+            "arxiv_search": "arxiv_search",
+            "rag_search": "rag_search"
+        }
+    )
+    
+    # Define edges
+    graph.add_edge("web_search", "grade_and_filter")
+    graph.add_edge("arxiv_search", "grade_and_filter")
+    graph.add_edge("rag_search", "grade_and_filter")
+    graph.add_edge("grade_and_filter", "Research_Strategist")
+    
+    graph.add_edge("synthesize", END)
     
     # Create memory and compile the graph
     memory = MemorySaver()
+    
+    # # Create connection
+    # sqlite_conn = sqlite3.connect("db.sqlite", check_same_thread = False)
+
+    # # Create memory
+    # memory = SqliteSaver(conn = sqlite_conn)
+    
     return graph.compile(checkpointer=memory)
