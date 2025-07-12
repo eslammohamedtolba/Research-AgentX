@@ -22,4 +22,7 @@ def get_retriever(embedding_function):
         print("Existing database found. Loading... ⚡️")
         db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
     
-    return db.as_retriever()
+    return db.as_retriever(
+                search_type="similarity_score_threshold",
+                search_kwargs={"k": 3, "score_threshold": 0.5}
+            )
