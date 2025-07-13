@@ -1,10 +1,8 @@
 import arxiv
-import random
-import time
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, AIMessage, BaseMessage
 
 # Import from our local project files
-from state import ResearchState, StrategistDecision, SourceGrade
+from state import ResearchState, SourceGrade
 from config import llm, search_tool, embedding_function
 from rag_setup import get_retriever
 
@@ -12,140 +10,84 @@ from rag_setup import get_retriever
 retriever = get_retriever(embedding_function)
 
 # Initialize the max number of refinements the strategist can use
-MAX_REFINEMENTS = 3
-
-# Helper Function for the Strategist's Prompt
-def create_status_report(state: ResearchState) -> str:
-    
-    """Creates a formatted status report for the strategist's prompt."""
-    total_docs = len(state.get('related_documents', []))
-    refinements = state.get('refinements_used', 0)
-
-    def get_source_status(count_key: str):
-        count = state.get(count_key, 0)
-        # Check if the key exists (meaning the tool has run and been graded)
-        if count is None:
-            return "Not chosen yet"
-        if count == 0:
-            return "Chosen, but didn't find any information"
-        return str(count)
-
-    return (
-        f"Refinements Used: {refinements}/{MAX_REFINEMENTS}\n"
-        f"Total Relevant Documents Found: {total_docs}\n\n"
-        "Source Breakdown (Relevant Documents):\n"
-        f"- Web Search: {get_source_status('web_count')}\n"
-        f"- ArXiv Search: {get_source_status('arxiv_count')}\n"
-        f"- RAG Search: {get_source_status('rag_count')}"
-    )
-
-def research_strategist(state: ResearchState) -> ResearchState:
-    """The central 'brain' of the agent."""
-    
-    # Initialize refined_query if it doesn't exist
-    if not state.get('refined_query'):
-        state['refined_query'] = state['query']
-    
-    time.sleep(10)
-    
-    structured_llm = llm.with_structured_output(StrategistDecision)
-    
-    system_prompt = (
-        "You are an expert research strategist. Your job is to create a plan to answer a user's query by making a two-part decision:\n"
-        "1.  **`refine` (True/False)**: First, decide if the current query needs to be rephrased to get better results. Set this to `True` only if a search has failed.\n"
-        "2.  **`next` (Tool Name)**: Second, choose the next tool to run (`web_search`, `arxiv_search`, `rag_search`, or `synthesize`).\n\n"
-        
-        "### Decision-Making Rules:\n"
-        "1.  **Search First**: If any tool reports 'Not chosen yet', your `next` action MUST be to choose one of those tools. You MUST set `refine` to `False`.\n"
-        "2.  **Handle Failure**: If all tools have been tried but one or more reported 'Chosen, but didn't find any information' AND you have refinements left, you MUST set `refine` to `True` and set `next` to the tool that failed (e.g., `web_search`).\n"
-        "3.  **Synthesize**: Once all tools have been tried successfully, or if you have run out of refinements, you MUST choose `synthesize` as your `next` action and set `refine` to `False`."
-    )
-    
-    status_report = create_status_report(state)
-    print("\n\n\n", "report: ", status_report, "\n\n\n")
-    
-    human_prompt = f"Original Query: {state['query']}\n\nReport: {status_report}\n\nBased on the rules, create a plan. What is your two-part decision for `refine` and `next`?"
-    
-    messages = [
-        SystemMessage(content=system_prompt), 
-        HumanMessage(content=human_prompt)
-    ]
-    
-    time.sleep(10)
-    
-    response = structured_llm.invoke(messages)
-    
-    
-    return {
-        "should_refine": response.refine,
-        "active_tool": response.next
-    }
-
-def route_after_strategist(state: ResearchState):
-    """Decides whether to refine the query or proceed directly to the next tool."""
-    
-    time.sleep(10)
-    
-    if state.get("should_refine"):
-        return "refine_query"
-    else:
-        return state.get('active_tool')
-
-def route_to_next_tool(state: ResearchState):
-    """Routes to the next tool planned by the strategist."""
-    
-    time.sleep(10)
-    
-    return state.get('active_tool')
+MAX_REFINEMENTS = 2
 
 # Helper function to create query variations
 def refine_query_node(state: ResearchState) -> ResearchState:
-    """Uses an LLM to create a variation of the original query."""
+    """
+    Uses an LLM to refine the query based on the conversation history and the failing tool.
+    """
+
+    active_tool = state.get('active_tool', 'web')
     
-    query = state['refined_query']
+    # This new prompt instructs the LLM on how to handle different query types.
+    prompt = (
+        f"You are a hyper-competent, expert-level Query Strategist. Your sole mission is to dissect a conversation and formulate the most effective search query possible for a specific tool: '{active_tool}'.\n"
+        "Your output MUST be ONLY the raw query string, with no extra text, explanations, or quotes.\n\n"
+        "--- ANALYSIS AND REFINEMENT PROCESS ---\n"
+        "1.  **Identify the Core User Goal:** Look at the most recent user message. What is the fundamental thing they want to *find* or *know*? Are they asking for paper titles, explanations, comparisons, code, etc.? The nature of their goal is critical.\n\n"
+        "2.  **Resolve Context from Full History:** Read the ENTIRE conversation history, including the AI's previous responses. Users often use vague terms like 'that', 'those topics', or 'what you said'. Your most important task is to replace these vague terms with the specific, concrete concepts from the preceding conversation. \n"
+        "    * **Example:** If the AI previously mentioned 'Multi-Agent Reinforcement Learning (MARL)' and the user then asks 'give me paper names for those topics', your query must explicitly include 'Multi-Agent Reinforcement Learning' or 'MARL'.\n\n"
+        "3.  **Handle Failure and Re-attempt:** If the query is a refinement because a previous search failed, you MUST NOT just make a minor tweak. Radically rephrase the query. Broaden it, narrow it, or use completely different synonyms and keywords to overcome the previous failure.\n\n"
+        "4.  **Synthesize the Final, Standalone Query (Calibrating for Intent):** Combine the core goal and resolved context. Critically, you must calibrate the query's depth and detail based on the inferred user intention, even if they don't use words like 'detailed'.\n"
+        "    * **Assess the Implicit Need for Detail:** Analyze the nature of the user's query. Is it a simple factual question (e.g., 'who created X?', 'when was Y released?')? Or is it a complex, open-ended question that requires synthesizing information (e.g., 'how does X work?', 'what is the impact of Y?', 'compare X and Z')?\n"
+        "    * **For Complex/Open-Ended Intent:** If the user's intention is clearly to understand a process, a relationship between concepts, or the implications of a topic, your query MUST be more comprehensive. It should include multiple facets of the topic to find rich documents capable of supporting a nuanced answer.\n"
+        "    * **Detail Example:** If the conversation is about LLMs and the user asks, 'How are they being used in scientific research', this implies a need for a detailed overview. A good query would be: `applications of large language models in scientific discovery biology drug design materials science`. This is far more effective than just `LLMs in scientific research`.\n"
+        "    * **For Simple/Factual Intent:** If the intention is to find a specific fact, the query should be concise and targeted. For 'Who created the Transformer architecture?', the query `who created the transformer neural network architecture` is sufficient.\n\n"
+        "5.  **Tool-Specific Optimization:** Fine-tune the query for the '{active_tool}' tool:\n"
+        "    * `web_search`: Can be a natural language question or keywords.\n"
+        "    * `arxiv_search`: Should be formal and academic. Use precise technical terms.\n"
+        "    * `rag_search`: Should use terminology very specific to the likely content of the local database (e.g., machine learning paper abstracts).\n\n"
+        "--- CONVERSATION HISTORY ---\n"
+        f"{state['messages']}\n\n"
+        "Final, optimized query string:"
+    )
     
-    time.sleep(10)
+    new_query = llm.invoke(prompt)
     
-    refine_prompt = f"Rephrase the following research query to find different but related results. Return only the new query. Original query: {query}"
-    new_query = llm.invoke(refine_prompt).content
-    
-    time.sleep(10)
+    refinement_key = f"refinements_{active_tool}_used"
     
     return {
-        'refined_query':new_query,
-        'refinements_used': state.get('refinements_used', 0) + 1,
-        'should_refine': False
+        'refined_query': new_query.content,
+        refinement_key: state.get(refinement_key, 0) + 1
     }
 
-def web_search_node(state: ResearchState) -> ResearchState:
+def route_after_refine(state: ResearchState):
+    """
+    After refining, route to the currently active tool.
+    """
+    if not state.get('active_tool', None):
+        return "web"
+    
+    return state['active_tool']
 
+
+def web_search_node(state: ResearchState) -> ResearchState:
+    """Performs a web search."""
+    
     results = search_tool.invoke({"query": state['refined_query']})
     
-    docs = [res['content'] for res in results]
-    
-    time.sleep(10)
-    
+    if isinstance(results, str):
+        # If results is a string, treat it as a single document or handle as an error
+        docs = [results] if results.strip() else []
+    elif isinstance(results, list):
+        # If results is a list, extract 'content' from each dictionary
+        docs = [res['content'] for res in results if res and isinstance(res, dict) and 'content' in res]
+
     return {
         "sources": docs, 
         "active_tool": "web"
-        }
+    }
 
 def arxiv_search_node(state: ResearchState) -> ResearchState:
-    
-    # Randomly pick the sort criterion to provide diversity
-    sort_criterion = random.choice([
-        arxiv.SortCriterion.Relevance, 
-        arxiv.SortCriterion.SubmittedDate
-    ])
+    """Performs an ArXiv search."""
     
     search = arxiv.Search(
-        query=state['refined_query'], 
+        query=state['refined_query'],
         max_results=3,
-        sort_by=sort_criterion
+        sort_by=arxiv.SortCriterion.Relevance
     )
     summaries = [result.summary.replace("\n", " ") for result in search.results()]
-    
-    time.sleep(10)
     
     return {
         "sources": summaries, 
@@ -153,62 +95,100 @@ def arxiv_search_node(state: ResearchState) -> ResearchState:
     }
 
 def rag_search_node(state: ResearchState) -> ResearchState:
-
-    retrieved_docs = retriever.invoke(state['refined_query']) or []
+    """Performs a RAG search."""
     
-    time.sleep(10)
+    retrieved_docs = retriever.invoke(state['refined_query']) or []
     
     return {
         "sources": [doc.page_content for doc in retrieved_docs],
         "active_tool": "rag"
     }
 
+
 def grade_and_filter_node(state: ResearchState) -> ResearchState:
     """Grades a list of documents and returns only the relevant ones."""
     
-    query = state['query'] # Always grade against the original query
+    query = state['messages'][-1].content
     documents = state['sources']
-    active_tool = state['active_tool']
     
     grader = llm.with_structured_output(SourceGrade)
+    
     relevant_docs = []
     for doc in documents:
         prompt = f"Is the following document relevant to the user's question? Document:\n\n{doc}\n\nQuestion: {query}"
         response = grader.invoke(prompt)
         if response.related:
             relevant_docs.append(doc)
-        time.sleep(4)
-        
+       
     # Append relevant docs to the main list
-    current_related = state.get('related_documents', [])
-    updated_related_docs = current_related + relevant_docs
-            
-    # Update the correct counter based on which tool ran
-    count_key = f"{active_tool}_count"
-    current_count = state.get(count_key) or 0
-    updated_count = current_count + len(relevant_docs)
-    
+    current_related_docs = state.get('related_documents', [])
+    updated_related_docs = current_related_docs + relevant_docs
+
     return {
         "related_documents": updated_related_docs,
-        count_key: updated_count,
+        "newly_added_count": len(relevant_docs),
         "sources": [] # Clear the temporary sources list
     }
+
+def route_after_grading(state: ResearchState):
+    """
+    Routes logic after the 'grade_and_filter' node.
+    Decides whether to refine or advance to the next tool.
+    """
+    # Get the count of documents that were just added in the last step
+    last_added_count = state.get("newly_added_count", 0)
+    active_tool = state["active_tool"]
+    
+    if last_added_count > 0:
+        # If docs were found, advance to the next tool in the sequence
+        if active_tool == "web":
+            return "arxiv"
+        elif active_tool == "arxiv":
+            return "rag"
+        else: # After rag, we are done with searching
+            return "synthesize"
+    else:
+        # If no docs were found, check if we can refine
+        refinement_key = f"refinements_{active_tool}_used"
+        if state.get(refinement_key, 0) < MAX_REFINEMENTS:
+            return "need_refine"
+        else:
+            # If out of refinements for this tool, advance anyway to avoid getting stuck
+            if active_tool == "web":
+                return "arxiv"
+            elif active_tool == "arxiv":
+                return "rag"
+            else:
+                return "synthesize"
+    
     
 def synthesizer_node(state: ResearchState) -> ResearchState:
+    """The final node that synthesizes the answer."""
+    
+    docs = "\n\n---\n\n".join(state.get('related_documents', []))
+    
+    synthesizer_messages: list[BaseMessage] = list(state["messages"])
+    
+    if not docs:
+        no_docs_message = "After a thorough search, I could not find any relevant documents to answer your question."
+        
+        synthesizer_messages.append(AIMessage(content=no_docs_message))
+        
+        return {
+            "messages": synthesizer_messages
+        }
 
-    context = "\n\n---\n\n".join(state.get('related_documents', []))
+    prompt = (
+        "Based ONLY on the following documents, provide a comprehensive and well-structured answer to the last user query. "
+        "Do not mention the documents themselves in your answer. Synthesize the information into a single, coherent response.\n\n"
+        f"Documents:\n{docs}"
+    )
     
-    if not context:
-        return {"final_answer": "After running the research process, no relevant documents were found to answer the query."}
-    
-    time.sleep(10)
-    
-    prompt = f"Based ONLY on the following documents, provide a comprehensive and well-structured answer to the user's original query.\n\nOriginal Query: {state['query']}\n\nDocuments:\n{context}"
-    response = llm.invoke(prompt)
-    
-    time.sleep(10)
-    
-    return {"final_answer": response.content}
-    
+    synthesizer_messages.append(SystemMessage(content=prompt))
 
-
+    response = llm.invoke(synthesizer_messages)
+    
+    return {
+        "messages": response
+    }
+    
