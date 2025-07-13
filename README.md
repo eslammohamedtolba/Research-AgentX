@@ -1,12 +1,12 @@
 # Research AgentX 🤖
 
-An autonomous, stateful research agent powered by **LangGraph**. It dynamically plans and executes research tasks, evaluates the relevance of its findings, and refines its own search queries to recover from failures. It leverages web searches, academic paper databases (ArXiv), and a local vector store to provide comprehensive, synthesized answers to complex questions.
+A conversational, multi-turn, and stateful research agent powered by **LangGraph**. It follows a deterministic workflow to search multiple data sources, intelligently refines its queries based on conversational context, and synthesizes its findings into a coherent answer. All conversation history is persistent, powered by a SQLite database backend.
 
 -----
 
 ## 🖼️ Application UI
 
-The user interface is designed for a seamless and interactive research experience. Users can ask a question and watch as the agent executes its plan, displaying the final synthesized answer.
+The user interface supports multiple, persistent conversations. Users can switch between chats, create new ones, and see the agent work through its research process in real-time.
 
 ![ResearchAgentX Application](<ResearchAgentX App.png>)
 
@@ -14,36 +14,37 @@ The user interface is designed for a seamless and interactive research experienc
 
 ## ✨ Overview
 
-**Research AgentX** is an advanced AI agent designed to automate the research process. Given a user's query, it intelligently plans and executes a series of steps to gather information from various sources, including:
+**Research AgentX** has evolved into a sophisticated conversational research assistant. It maintains the context of a conversation across multiple turns, allowing for follow-up questions and iterative exploration of topics.
 
-- **General Web Search**: For up-to-date information and broad topics using Tavily Search.
-- **Academic Papers**: For scientific and technical knowledge from ArXiv.
+Given a user's query, it executes a structured, deterministic plan to gather information from:
+
+- **General Web Search**: For up-to-date information using Tavily Search.
+- **Academic Papers**: For scientific knowledge from ArXiv.
 - **Internal Knowledge Base**: For specialized information using a Retrieval-Augmented Generation (RAG) pipeline with a local ChromaDB instance.
 
-The agent uses a stateful, conditional graph built with LangGraph to manage its workflow, ensuring it makes informed decisions about searching, grading, refining its queries, and synthesizing a final answer.
+The agent uses a stateful graph built with LangGraph and a **SQLite checkpointer** to manage its workflow and persist all conversation history, ensuring no data is lost between sessions.
 
 -----
 
 ## ⚙️ How It Works
 
-The agent's logic is a sophisticated state machine with conditional routing that allows for intelligent recovery and planning.
+The agent's logic has been refactored from an LLM-based planner to a more robust and predictable deterministic workflow.
 
-1.  **Planning**: The `Research_Strategist` node (the "brain") analyzes the query and the current state to create a two-part plan: whether to refine the query (`refine: bool`) and which tool to use next (`next: tool_name`).
-2.  **Conditional Routing**: The graph first checks the `refine` plan.
-    - If `True`, it routes to the `refine_query` node to improve the search query.
-    - If `False`, it proceeds directly to the planned tool.
-3.  **Tool Execution**: The chosen search tool (`web_search`, `arxiv_search`, or `rag_search`) runs with the current query.
-4.  **Relevance Grading**: After a search, the results are sent to the `grade_and_filter` node. This node uses an LLM to discard irrelevant documents, ensuring only high-quality information proceeds.
-5.  **Loop & Re-plan**: Control returns to the `Research_Strategist`, which analyzes the new state (including the new documents and tool usage counts) and creates a new plan.
-6.  **Synthesis**: This loop of planning, searching, and grading continues until the strategist determines the research is complete. It then calls the `synthesize` node to consolidate all relevant information into a single, coherent answer.
+1.  **Query Refinement**: Every user query first enters the `refine_query` node. This node uses an LLM with a highly detailed prompt to analyze the full conversation history. It rewrites the user's latest message into a complete, standalone search query, resolving context and handling follow-up questions.
+2.  **Sequential Search & Grading**: The agent proceeds through its tools in a fixed order: `web_search`, then `arxiv_search`, then `rag_search`.
+    - After each search, the results are passed to the `grade_and_filter` node, which uses an LLM to discard irrelevant documents.
+3.  **Conditional Routing**: The `route_after_grading` function checks if the last search found any relevant documents.
+    - If **YES**, it proceeds to the next tool in the sequence (e.g., from `web_search` to `arxiv_search`).
+    - If **NO**, it loops back to the `refine_query` node to try a different query for the *same* tool. It will retry up to a defined limit before moving on.
+4.  **Synthesis**: Once all search tools have been tried, the graph proceeds to the `synthesize` node. This node takes all the relevant documents collected from all sources and generates a final, comprehensive answer based on the user's last question.
+5.  **Persistence**: The entire state of the conversation, including every message and intermediate step, is automatically saved to a `db.sqlite` file using LangGraph's `SqliteSaver`.
+
 
 -----
 
 ## 🧠 Graph Architecture
 
-The new architecture uses **conditional edges** to create a dynamic, intelligent workflow. After gathering results, a dedicated `grade_and_filter` node assesses relevance. If a search fails, the graph can now enter a `refine_query` loop to recover and retry, making the agent far more robust.
-
-**[IMPORTANT: Replace the image below with your new graph diagram, `ResearchAgentX Graph.png`]**
+The new architecture is a deterministic, sequential graph that prioritizes reliability and predictability. It uses conditional edges to loop for query refinement when a search tool fails to find useful information. This design removes the "LLM-in-the-loop" for planning, resulting in a more stable and debuggable agent.
 
 ![New ResearchAgentX Graph architecture](<ResearchAgentX Graph.PNG>)
 
@@ -51,12 +52,14 @@ The new architecture uses **conditional edges** to create a dynamic, intelligent
 
 ## 🚀 Key Features
 
-- **Stateful Execution**: Maintains a complete state of its progress, allowing for context-aware decisions.
-- **Multi-Tool Orchestration**: Dynamically chooses between web search, ArXiv, and an internal RAG pipeline.
-- **Intelligent Failure Recovery**: Automatically refines and retries search queries that fail to yield relevant results.
-- **Relevance-Based Grading**: Employs an LLM-powered grader to filter out irrelevant noise from search results, ensuring high-quality context for the final answer.
-- **Conditional Graph Logic**: Uses LangGraph's conditional edges to dynamically route between searching, grading, refining, and synthesizing.
-- **Retrieval-Augmented Generation (RAG)**: Leverages a local ChromaDB vector store for expert-level knowledge retrieval.
+- **Conversational Memory**: Maintains the full context of a conversation, allowing for natural follow-up questions.
+- **Persistent Chat History**: Uses a SQLite database to save all conversations, so you never lose your work.
+- **Multi-Conversation Management**: A sidebar UI allows you to create, delete, and switch between different chat sessions.
+- **Automatic Conversation Titling**: Automatically generates a concise title for new chats based on your first query.
+- **Intelligent Query Refinement**: A dedicated node analyzes user intent and conversational history to create highly effective search queries.
+- **Multi-Tool Orchestration**: Sequentially queries the web, ArXiv, and an internal RAG pipeline.
+- **Relevance-Based Grading**: Employs an LLM-powered grader to filter out irrelevant noise from search results.
+
 
 -----
 
@@ -64,10 +67,10 @@ The new architecture uses **conditional edges** to create a dynamic, intelligent
 
 - **Orchestration**: LangChain & LangGraph
 - **LLM**: Google Gemini (`gemini-2.0-flash`)
+- **Database**: SQLite (for conversation state) & ChromaDB (for RAG)
 - **Web Search**: Tavily Search API
-- **Vector Database**: ChromaDB
-- **Embeddings**: Hugging Face Sentence Transformers (`all-MiniLM-L6-v2`)
 - **Academic Search**: ArXiv Python Library
+- **Embeddings**: Hugging Face Sentence Transformers (`all-MiniLM-L6-v2`)
 - **UI Framework**: Streamlit
 
 -----
@@ -113,9 +116,9 @@ The new architecture uses **conditional edges** to create a dynamic, intelligent
     streamlit run app.py
     ```
 
-2.  **First-Time Setup**: The first time you run the application, it will download the ML paper dataset from Hugging Face and build the ChromaDB vector store. This may take a few minutes. Subsequent runs will be much faster.
+2.  **First-Time Setup**: The first time you run the application, it will download the ML paper dataset from Hugging Face and build the ChromaDB vector store. This may take a few minutes. Subsequent runs will be much faster as it will load the existing database.
 
-3.  **Ask a Question**: Open your browser to the Streamlit URL, type your research question, and press Enter.
+3.  **Start Chatting**: Open your browser to the Streamlit URL. A new chat will be created automatically. Type your research question and press Enter.
 
 -----
 
