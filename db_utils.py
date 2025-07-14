@@ -6,69 +6,87 @@ DB_FILE = "db.sqlite"
 
 def get_db_connection():
     """Establishes a connection to the SQLite database."""
-    # check_same_thread=False is needed for Streamlit's multi-threading
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
 def initialize_db():
     """
-    Initializes the database by creating a 'conversations' table if it doesn't exist.
-    This table will store a user-friendly name for each thread_id.
+    Initializes the database. Renames 'created_at' to 'used_at' if the old column exists,
+    then creates the 'conversations' table if it doesn't exist.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # Check if the table exists and if the old 'created_at' column is present
+        cursor.execute("PRAGMA table_info(conversations)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'created_at' in columns:
+            # Simple migration: just rename the column for existing users
+            cursor.execute("ALTER TABLE conversations RENAME COLUMN created_at TO used_at")
+
+        # Create the table with the correct 'used_at' column if it doesn't exist
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 thread_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.commit()
 
 def get_all_conversations():
     """
-    Retrieves all conversations from the 'conversations' table, ordered by creation time.
+    Retrieves all conversations from the 'conversations' table, ordered by most recently used.
     """
     with get_db_connection() as conn:
-        conn.row_factory = sqlite3.Row # This allows accessing columns by name
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM conversations ORDER BY created_at DESC")
+        # Order by the new 'used_at' column
+        cursor.execute("SELECT * FROM conversations ORDER BY used_at DESC")
         return [dict(row) for row in cursor.fetchall()]
 
 def create_new_conversation():
     """
-    Creates a new conversation with a unique thread_id and a default name.
-    Returns the thread_id and the name of the newly created conversation.
+    Creates a new conversation, setting its initial 'used_at' timestamp.
     """
     thread_id = str(uuid.uuid4())
-    # Generate a default name
     name = "New Chat"
-    
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # Ensure the 'used_at' is set on creation
         cursor.execute(
-            "INSERT INTO conversations (thread_id, name) VALUES (?, ?)",
+            "INSERT INTO conversations (thread_id, name, used_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
             (thread_id, name)
         )
         conn.commit()
     return thread_id, name
 
+def update_conversation_timestamp(thread_id: str):
+    """
+    Updates the 'used_at' timestamp for a given conversation to the current time.
+    This is the key function to call whenever a chat is accessed.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE conversations SET used_at = CURRENT_TIMESTAMP WHERE thread_id = ?",
+            (thread_id,)
+        )
+        conn.commit()
+
 def rename_conversation(thread_id: str, query: str):
-    """Renames a conversation in the database."""
-    
-    # Generate the new name
+    """Renames a conversation and updates its 'used_at' timestamp."""
+    update_conversation_timestamp(thread_id) # Update timestamp on rename
     new_name = generate_conversation_title(query=query)
-    
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE conversations SET name = ? WHERE thread_id = ?", (new_name, thread_id))
         conn.commit()
-        
+    return new_name
+
 def delete_conversation(thread_id: str):
-    """Deletes a conversation from the 'conversations' table."""
+    """Deletes a conversation from the 'conversations' and 'checkpoints' tables."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # We also need to delete the checkpoints from LangGraph's table
         cursor.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
         cursor.execute("DELETE FROM conversations WHERE thread_id = ?", (thread_id,))
         conn.commit()
+        
