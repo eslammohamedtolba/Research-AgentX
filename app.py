@@ -2,83 +2,62 @@ import streamlit as st
 from graph import create_graph
 from langchain_core.messages import HumanMessage, AIMessage
 import db_utils
+import time
 
-# Create the 'conversations' table on the first run if not exist
+# Create the 'conversations' table on the first run if it doesn't exist
 db_utils.initialize_db()
 
-# Streamlit setup
-st.set_page_config(page_title="Research AgentX", page_icon="🤖")
+# Streamlit Page Setup 
+st.set_page_config(page_title="Research AgentX", page_icon="🤖", layout="wide")
 st.title("Research AgentX 🤖")
 st.caption("A stateful research agent powered by LangGraph and SQLite.")
 
-# The graph is created once and stored in session state
+# Agent and Session State Initialization
 if 'agent_app' not in st.session_state:
     st.session_state.agent_app = create_graph()
 
-app = st.session_state.agent_app
-
-# This logic now handles creating new chats and loading existing ones.
+# Initialize thread_id if it's not already set
 if "thread_id" not in st.session_state:
-    # Check if there are any conversations left to fall back to
-    all_convs = db_utils.get_all_conversations()
-    if all_convs:
-        st.session_state.thread_id = all_convs[0]['thread_id']
-        st.session_state.thread_name = all_convs[0]['name']
-    else:
-        # If no conversations exist, create a new one
-        thread_id, thread_name = db_utils.create_new_conversation()
-        st.session_state.thread_id = thread_id
-        st.session_state.thread_name = thread_name
+    st.session_state.thread_id = None
 
-# The config is now created dynamically based on the session's thread_id
-config = {
-    "configurable": {
-        "thread_id": st.session_state.thread_id,
-        "recursion_limit": 50
-    }
-}
-
+# Sidebar for Conversation Management
 with st.sidebar:
     st.header("Conversations")
     
     if st.button("➕ New Chat", use_container_width=True):
         thread_id, thread_name = db_utils.create_new_conversation()
         st.session_state.thread_id = thread_id
-        st.session_state.thread_name = thread_name
         st.rerun()
 
     st.divider()
 
     conversations = db_utils.get_all_conversations()
     for conv in conversations:
-        # Create a single row with two columns: name (left), delete (right)
-        cols = st.columns([0.85, 0.15])
-        
+        cols = st.columns([0.8, 0.2])
         with cols[0]:
-            button_type = "primary" if conv['thread_id'] == st.session_state.thread_id else "secondary"
+            is_selected = (st.session_state.thread_id and conv['thread_id'] == st.session_state.thread_id)
+            button_type = "primary" if is_selected else "secondary"
             if st.button(conv['name'], key=f"select_{conv['thread_id']}", use_container_width=True, type=button_type):
                 st.session_state.thread_id = conv['thread_id']
-                st.session_state.thread_name = conv['name']
+                db_utils.update_conversation_timestamp(conv['thread_id'])
                 st.rerun()
         
         with cols[1]:
-            if st.button("X", key=f"delete_{conv['thread_id']}", help="Delete this conversation"):
+            if st.button("🗑️", key=f"delete_{conv['thread_id']}", help="Delete this conversation"):
                 db_utils.delete_conversation(conv['thread_id'])
                 if conv['thread_id'] == st.session_state.thread_id:
-                    del st.session_state.thread_id
+                    st.session_state.thread_id = None
                 st.rerun()
 
-# Display full history (user and assistant pairs)
-def display_chat_history():
-    """Displays messages from the history."""
-    
-    # Get the current state to access messages
+# Main Chat Interface
+def display_chat_history(app, config):
+    """Displays messages from the history for the given config."""
     history = app.get_state(config)
     if not history:
         return
     
-    # Get the message list from the latest state
-    for msg in history.values.get('messages', []):
+    messages = history.values.get('messages', [])
+    for msg in messages:
         if isinstance(msg, HumanMessage):
             with st.chat_message("user"):
                 st.markdown(msg.content)
@@ -86,47 +65,67 @@ def display_chat_history():
             with st.chat_message("assistant"):
                 st.markdown(msg.content)
 
-# Handle streaming + display steps inline
-def stream_response(initial_state: str):
-    """Streams the agent's response and displays status updates for each step."""
-    
+def stream_response(app, initial_state, config):
+    """Streams the agent's response."""
     with st.status("Thinking...", expanded=True) as status:
         final_answer = None
-        # Stream the response using the new initial_state
         for step in app.stream(initial_state, config=config):
-            
             node = list(step.keys())[0]
-            
             if node == "web_search":
                 status.update(label="🔍 Searching the Web...")
             elif node == "arxiv_search":
-                status.update(label="📄 Searching ArXiv for papers...")
+                status.update(label="📄 Searching ArXiv...")
             elif node == "rag_search":
-                status.update(label="📚 Searching the RAG knowledge base...")
+                status.update(label="📚 Searching Knowledge Base...")
             elif node == "grade_and_filter":
-                status.update(label="⚖️ Grading and filtering documents...")
+                status.update(label="⚖️ Grading and filtering...")
             elif node == "refine_query":
-                status.update(label="✍️ Refining the search query...")
+                status.update(label="✍️ Refining query...")
             elif node == "synthesize":
                 output = step[node]
-                
-                final_answer = output["messages"].content
+                if "messages" in output and output["messages"]:
+                    final_answer = output["messages"].content
                 status.update(label="✅ Done!", state="complete")
-                
+            time.sleep(0.5)
         yield final_answer or "The agent finished without providing a final answer."
 
-# Main chat UI
-display_chat_history()
 
-# Chat input
+# Display the history of the currently selected chat, if any.
+if st.session_state.thread_id:
+    app = st.session_state.agent_app
+    config = {"configurable": {"thread_id": st.session_state.thread_id, "recursion_limit": 50}}
+    display_chat_history(app, config)
+
+# Always display the chat input box at the bottom.
 if prompt := st.chat_input("Ask a research question..."):
+    
+    # If no chat is selected, create a new one automatically.
+    if not st.session_state.thread_id:
+        thread_id, thread_name = db_utils.create_new_conversation()
+        st.session_state.thread_id = thread_id
+    
+    # Create the config for this run.
+    app = st.session_state.agent_app
+    config = {
+        "configurable": {
+            "thread_id": st.session_state.thread_id,
+            "recursion_limit": 50
+        }
+    }
+
+    # Update the timestamp because the conversation is being used.
+    db_utils.update_conversation_timestamp(st.session_state.thread_id)
+
+    # Display the user's message.
     with st.chat_message("user"):
         st.markdown(prompt)
-        
-    # If this was the first message in the chat, trigger the rename.
-    if not app.get_state(config):
+    
+    # Check if this is the very first message to trigger the rename.
+    history = app.get_state(config)
+    if not history.values.get("messages"):
         db_utils.rename_conversation(st.session_state.thread_id, prompt)
-
+    
+    # Stream the assistant's response.
     with st.chat_message("assistant"):
         initial_state = {
             "messages": [HumanMessage(content=prompt)],
@@ -138,9 +137,7 @@ if prompt := st.chat_input("Ask a research question..."):
             "refinements_rag_used": 0,
             "active_tool": "web"
         }
-        st.write_stream(stream_response(initial_state))
-
-    # Rerun to clear the input box and potentially update history display
+        st.write_stream(stream_response(app, initial_state, config))
+    
+    # Rerun to update the sidebar with the new name and order.
     st.rerun()
-
-
