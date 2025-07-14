@@ -3,7 +3,6 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3 
 
 # Import from our local project files
-from state import ResearchState
 from nodes import (
     refine_query_node,
     web_search_node,
@@ -13,6 +12,7 @@ from nodes import (
     route_after_grading,
     route_after_refine,
     synthesizer_node,
+    ResearchState
 )
 
 def create_graph():
