@@ -13,7 +13,7 @@ def get_retriever(embedding_function):
             Document(
                 page_content=row["abstract"],
                 metadata={"title": row["title"]}
-            ) for row in dataset.select(range(20000))
+            ) for row in dataset.select(range(80000))
         ]
         db = Chroma.from_documents(docs, embedding_function, persist_directory=CHROMA_PATH)
     else:
